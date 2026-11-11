@@ -9,8 +9,13 @@ Local-first semantic + keyword search over your PDFs. Returns the best file, pag
     python -m recall.cli search "the pdf that explains the lost update problem with an example"
     python -m recall.cli search "..." --mode keyword|semantic|hybrid
     python -m recall.cli status                     # counts, pending embeddings, files that failed to index
+    python -m recall.cli --db recall.db serve       # optional local browser interface at 127.0.0.1:8000
 Use `--db path.db` to choose the database (default `recall.db`). Exit codes: 0 ok, 1 some files failed to
 index (they are retried next run), 2 error (bad folder, semantic search unavailable).
+
+The optional web interface requires Flask: `pip install -r requirements-web.txt`. It binds to this computer
+only by default. Setting `serve --host` to a non-loopback address exposes indexed PDF search and downloads on
+the network; the server has no login, so only do this on a trusted network.
 
 ## Tests
     pip install -r requirements-dev.txt

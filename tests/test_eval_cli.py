@@ -1,10 +1,15 @@
+import builtins
 import json
+import sys
+import types
 
 import pytest
 
+import recall.cli as cli
 from recall import eval as ev
 from recall import sample_data
 from recall.cli import main as cli_main
+from recall.db import connect
 from recall.indexer import index_folder
 from recall.search import SemanticUnavailable
 
@@ -17,6 +22,10 @@ def fake_search_factory(table):
 
 def r(name, page):
     return {"path": f"/x/{name}", "page": page, "snippet": "", "why": ""}
+
+
+def fail(*_args, **_kwargs):
+    raise RuntimeError("failure")
 
 
 def test_metric_math(monkeypatch):
@@ -139,6 +148,123 @@ def test_cli_exit_codes_for_failures_and_errors(tmp_path, docs, make_pdf, capsys
     assert "left alone" in capsys.readouterr().err
     assert cli_main(["--db", db, "search", "x", "--mode", "semantic"]) == 2
     assert "semantic search unavailable" in capsys.readouterr().err
+
+
+def test_cli_closes_database_on_success_and_exception(tmp_path, monkeypatch, capsys):
+    class TrackedConnection:
+        def __init__(self, path):
+            self.connection = connect(str(path))
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def close(self):
+            self.closed = True
+            self.connection.close()
+
+    success = TrackedConnection(tmp_path / "success.db")
+    monkeypatch.setattr(cli, "connect", lambda _path: success)
+    assert cli_main(["status"]) == 0
+    assert success.closed
+    capsys.readouterr()
+
+    failure = TrackedConnection(tmp_path / "failure.db")
+    monkeypatch.setattr(cli, "connect", lambda _path: failure)
+    monkeypatch.setattr(cli, "search", fail)
+    with pytest.raises(RuntimeError, match="failure"):
+        cli_main(["search", "query", "--mode", "keyword"])
+    assert failure.closed
+
+
+def test_cli_serve_does_not_open_database_and_uses_requested_address(tmp_path, monkeypatch, capsys):
+    calls = []
+    web = types.ModuleType("recall.web")
+    web.serve = lambda *args: calls.append(args)
+    monkeypatch.setitem(sys.modules, "recall.web", web)
+
+    db_path = tmp_path / "serve.db"
+    assert cli_main(["--db", str(db_path), "serve", "--host", "127.0.0.1", "--port", "8123"]) == 0
+
+    assert calls == [(str(db_path), "127.0.0.1", 8123)]
+    assert not db_path.exists()
+    assert "starting recall at http://127.0.0.1:8123" in capsys.readouterr().out
+
+
+def test_cli_serve_reports_missing_flask_without_creating_database(tmp_path, monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, "recall.web", raising=False)
+    real_import = builtins.__import__
+
+    def import_without_flask(name, *args, **kwargs):
+        if name == "flask":
+            raise ModuleNotFoundError("No module named 'flask'", name="flask")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_flask)
+    db_path = tmp_path / "missing-flask.db"
+
+    assert cli_main(["--db", str(db_path), "serve"]) == 2
+    assert "needs Flask" in capsys.readouterr().err
+    assert not db_path.exists()
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "-1"])
+def test_cli_serve_rejects_invalid_port(port):
+    with pytest.raises(SystemExit) as exc:
+        cli_main(["serve", "--port", port])
+    assert exc.value.code == 2
+
+
+def test_cli_serve_rejects_empty_host():
+    with pytest.raises(SystemExit) as exc:
+        cli_main(["serve", "--host", " "])
+    assert exc.value.code == 2
+
+
+def test_cli_serve_surfaces_bind_errors(tmp_path, monkeypatch, capsys):
+    web = types.ModuleType("recall.web")
+
+    def fail_to_bind(*_args):
+        raise OSError("address already in use")
+
+    web.serve = fail_to_bind
+    monkeypatch.setitem(sys.modules, "recall.web", web)
+
+    assert cli_main(["--db", str(tmp_path / "serve.db"), "serve"]) == 2
+    assert "could not start web server" in capsys.readouterr().err
+
+
+def test_cli_serve_warns_when_exposing_server_to_network(tmp_path, monkeypatch, capsys):
+    web = types.ModuleType("recall.web")
+    web.serve = lambda *_args: None
+    monkeypatch.setitem(sys.modules, "recall.web", web)
+
+    assert cli_main(["--db", str(tmp_path / "serve.db"), "serve", "--host", "0.0.0.0"]) == 0
+    assert "There is no login" in capsys.readouterr().err
+
+
+def test_cli_serve_formats_ipv6_loopback_address(monkeypatch, capsys):
+    web = types.ModuleType("recall.web")
+    web.serve = lambda *_args: None
+    monkeypatch.setitem(sys.modules, "recall.web", web)
+
+    assert cli_main(["serve", "--host", "::1", "--port", "8123"]) == 0
+    output = capsys.readouterr()
+    assert "http://[::1]:8123" in output.out
+    assert output.err == ""
+
+
+def test_cli_serve_handles_ctrl_c(tmp_path, monkeypatch, capsys):
+    web = types.ModuleType("recall.web")
+
+    def interrupt(*_args):
+        raise KeyboardInterrupt
+
+    web.serve = interrupt
+    monkeypatch.setitem(sys.modules, "recall.web", web)
+
+    assert cli_main(["--db", str(tmp_path / "serve.db"), "serve"]) == 130
+    assert "starting recall" in capsys.readouterr().out
 
 
 def test_paraphrase_queries_really_avoid_the_target_vocabulary():
