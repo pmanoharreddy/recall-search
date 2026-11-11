@@ -1,0 +1,42 @@
+[
+ {
+  "query": "Which projects has this student developed?",
+  "expected": "portfolio.pdf",
+  "type": "projects"
+ },
+ {
+  "query": "What technologies power the candidate applications?",
+  "expected": "portfolio.pdf",
+  "type": "technologies"
+ },
+ {
+  "query": "Which projects and technologies were used to build them?",
+  "expected": "portfolio.pdf",
+  "type": "projects+technologies"
+ },
+ {
+  "query": "What technical skills does this candidate possess?",
+  "expected": "candidate_profile.pdf",
+  "type": "skills"
+ },
+ {
+  "query": "Which strengths and capabilities are described for this applicant?",
+  "expected": "candidate_profile.pdf",
+  "type": "skills"
+ },
+ {
+  "query": "What does the report cover and which evidence supports its findings?",
+  "expected": "research_report.pdf",
+  "type": "document-contents"
+ },
+ {
+  "query": "What subjects are explained in these course materials?",
+  "expected": "course_notes.pdf",
+  "type": "document-contents"
+ },
+ {
+  "query": "What are the main ideas in the provided study material?",
+  "expected": "course_notes.pdf",
+  "type": "document-contents"
+ }
+]

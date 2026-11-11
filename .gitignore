@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Generated databases
+*.db
+
+# Eval outputs
+eval_results.json
+broad_eval_results.json
+
+# Env / secrets
+.env
+
+# Editor/OS
+.vscode/
+.DS_Store

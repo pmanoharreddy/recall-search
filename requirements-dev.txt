@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest
+# optional: faster exact vector search for large collections (RECALL_VECTOR_BACKEND=faiss)
+faiss-cpu
