@@ -15,7 +15,7 @@ from recall.search import SemanticUnavailable
 
 
 def fake_search_factory(table):
-    def fake_search(con, q, mode, top_files=5):
+    def fake_search(con, q, mode, top_files=5, **kwargs):
         return table[q]
     return fake_search
 
@@ -120,6 +120,21 @@ def test_eval_runs_all_modes_with_embedder(tmp_path, capsys, fake):
     ev.main([str(tmp_path / "q.json"), db, "--json", str(out_json)])
     rep = json.load(open(out_json))
     assert all(rep["modes"][m]["measured"] for m in ("keyword", "semantic", "hybrid"))
+
+
+def test_eval_does_not_score_keyword_fallback_as_hybrid(tmp_path, docs, make_pdf, fake):
+    make_pdf(docs / "cars.pdf", ["Fuel for an automobile"])
+    db = str(tmp_path / "eval.db")
+    assert cli_main(["--db", db, "index", str(docs)]) == 0
+    fake.fail_all = True
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps([{"query": "fuel", "expected": "cars.pdf"}]))
+    report = tmp_path / "report.json"
+    assert ev.main([str(labels), db, "--json", str(report)]) == 0
+    modes = json.loads(report.read_text())["modes"]
+    assert modes["keyword"]["recall_at_k"] == 1.0
+    for mode in ("semantic", "hybrid"):
+        assert not modes[mode]["measured"] and "could not embed" in modes[mode]["reason"]
 
 
 # ---------------------------------------------------------------- CLI

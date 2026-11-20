@@ -57,6 +57,25 @@ def test_web_status_empty_query_and_request_validation(tmp_path):
     assert client.get("/file/999").status_code == 404
 
 
+def test_identical_copy_links_open_the_correct_pdf(tmp_path, docs, make_pdf, quiet):
+    original = make_pdf(docs / "original.pdf", ["Revising the course timetable"])
+    duplicate = docs / "backup.pdf"
+    duplicate.write_bytes(original.read_bytes())
+    db_path = str(tmp_path / "locations.db")
+    con = connect(db_path)
+    try:
+        index_folder(con, str(docs), use_embeddings=False, log=quiet)
+    finally:
+        con.close()
+    client = create_app(db_path).test_client()
+    results = client.get("/api/search?q=course+timetable&mode=keyword").get_json()["results"]
+    assert len(results) == 1 and len(results[0]["copies"]) == 1
+    other = results[0]["copies"][0]
+    assert {results[0]["path"], other["path"]} == {str(original), str(duplicate)}
+    with client.get(other["url"]) as response:
+        assert other["exists"] and response.data == original.read_bytes()
+
+
 def test_web_reports_semantic_unavailable_as_service_unavailable(tmp_path, monkeypatch):
     import recall.web as web
 

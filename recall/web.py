@@ -75,10 +75,7 @@ def create_app(db_path="recall.db"):
 
         results = []
         for r in found:
-            row = con.execute("SELECT id FROM files WHERE path=?", (r["path"],)).fetchone()
-            if row is None:
-                continue
-            fid = row[0]
+            fid = r["file_id"]
             results.append(dict(
                 file_id=fid,
                 name=os.path.basename(r["path"]),
@@ -89,6 +86,8 @@ def create_app(db_path="recall.db"):
                 why=r["why"],
                 score=r.get("semantic_score"),
                 exists=os.path.isfile(r["path"]),
+                copies=[dict(path=copy["path"], exists=os.path.isfile(copy["path"]),
+                             url=f"/file/{copy['file_id']}") for copy in r.get("copies", [])],
                 url=f"/file/{fid}",
                 download_url=f"/file/{fid}?download=1",
             ))

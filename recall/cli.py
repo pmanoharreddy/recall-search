@@ -124,6 +124,8 @@ def main(argv=None):
             for n, r in enumerate(results, 1):
                 sim = f"  sim={r['semantic_score']:.2f}" if r.get("semantic_score") is not None else ""
                 print(f"{n}. {r['path']}  (page {r['page']})  [{r['why']}]{sim}\n   {r['snippet']}\n")
+                for copy in r.get("copies", []):
+                    print(f"   Other location: {copy['path']}")
         return 0
     finally:
         con.close()

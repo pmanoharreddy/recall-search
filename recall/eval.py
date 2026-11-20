@@ -36,13 +36,16 @@ def evaluate_full(con, queries, mode, k=5):
     overall, by_type = blank(), {}
     t0 = time.perf_counter()
     for item in queries:
-        res = search(con, item["query"], mode, top_files=k)
+        res = search(con, item["query"], mode, top_files=k, require_semantic=True)
         exp = _expected(item)
-        names = [os.path.basename(r["path"]) for r in res]
-        rank = next((i + 1 for i, n in enumerate(names) if n in exp), None)
+        def expected_file(hit):
+            return (os.path.basename(hit["path"]) in exp or
+                    any(os.path.basename(copy["path"]) in exp for copy in hit.get("copies", [])))
+        matched = [(i, hit["page"]) for i, hit in enumerate(res, 1) if expected_file(hit)]
+        rank = matched[0][0] if matched else None
         page_ok = None
         if item.get("pages"):
-            page_ok = any(os.path.basename(r["path"]) in exp and r["page"] in item["pages"] for r in res)
+            page_ok = any(page in item["pages"] for _, page in matched)
         for bucket in (overall, by_type.setdefault(item.get("type", "all"), blank())):
             bucket["n"] += 1
             if rank:
@@ -81,10 +84,14 @@ def main(argv=None):
     ap.add_argument("queries"); ap.add_argument("db", nargs="?", default="recall.db")
     ap.add_argument("--k", type=int, default=5); ap.add_argument("--json")
     a = ap.parse_args(argv)
+    if a.k < 1:
+        ap.error("--k must be at least 1")
+    with open(a.queries, encoding="utf-8") as fh:
+        qs = json.load(fh)
+    if not isinstance(qs, list) or not qs:
+        ap.error("the query file must contain a nonempty list of labelled queries")
     con = connect(a.db)
     try:
-        with open(a.queries) as fh:
-            qs = json.load(fh)
         n_chunks = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         n_emb = con.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0]
         print(f"{len(qs)} queries | index: {n_chunks} chunks, {n_emb} with embeddings | k={a.k}")

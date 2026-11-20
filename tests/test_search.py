@@ -150,10 +150,121 @@ def test_rrf_prefers_items_ranked_well_in_both_lists():
     assert scores[1] > scores[2] and scores[3] > scores[4]
 
 
+@pytest.mark.parametrize("mode", ["keyword", "semantic", "hybrid"])
+def test_filename_lookup_includes_scans_and_prefers_literal_name(con, no_embedder, mode):
+    con.executemany("INSERT INTO files(path) VALUES(?)", [("old/Budget_2025.pdf",),
+                    ("team/BUDGET-2025.pdf",), ("archive/Budget 2024.pdf",)])
+    hits = search(con, "budget-2025.PDF", mode)
+    assert [hit["path"] for hit in hits] == ["team/BUDGET-2025.pdf", "old/Budget_2025.pdf"]
+    assert all(hit["why"] == "filename match" and hit["page"] == 1 for hit in hits)
+    assert "No searchable text" in hits[0]["snippet"]
+    assert search(con, "budget 2025", mode, top_files=1) == hits[1:]
+
+
+def test_filename_stem_keeps_content_results_without_duplicates(con):
+    con.executemany("INSERT INTO files(id, path) VALUES(?, ?)", [(1, "Résumé__.pdf"), (2, "guide.pdf")])
+    con.executemany("INSERT INTO chunks(file_id, page, text) VALUES(?, 2, ?)",
+                    [(1, "A resume about engineering"), (2, "How to write a resume")])
+    hits = search(con, "resume", "keyword")
+    assert [(h["path"], h["why"], h["page"]) for h in hits] == [
+        ("Résumé__.pdf", "filename match", 2), ("guide.pdf", "keyword match", 2)]
+
+
+def test_literal_filename_with_no_words(con):
+    con.execute("INSERT INTO files(path) VALUES('---.pdf')")
+    assert names(search(con, "---.pdf")) == ["---.pdf"]
+    assert search(con, "!!!") == []
+
+
+def test_unique_keyword_evidence_beats_partial_agreement(con, monkeypatch):
+    con.executemany("INSERT INTO files(id, path) VALUES(?, ?)", [(1, "card.pdf"), (2, "manual.pdf")])
+    con.executemany("INSERT INTO chunks(id, file_id, page, text) VALUES(?, ?, ?, ?)",
+                    [(1, 1, 3, "badge 4837"), (2, 2, 1, "badge instructions")])
+    monkeypatch.setattr(search_module, "semantic_scored", lambda *args, **kwargs: [(2, 0.9)])
+    hits = search(con, "badge 4837", "hybrid")
+    assert [(h["path"], h["page"]) for h in hits] == [("card.pdf", 3), ("manual.pdf", 1)]
+
+
+def test_hybrid_keeps_a_leading_single_signal_result_in_view():
+    order, _ = rrf(list(range(1, 51)), list(range(2, 51)))
+    assert 1 in order[:8]
+
+
+def test_stopwords_alone_do_not_generate_semantic_matches(corpus, fake):
+    fake.calls.clear()
+    assert search(corpus, "the and of", "hybrid") == []
+    assert not fake.calls
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+def test_phrase_promotes_file_and_opens_the_page_with_the_phrase(con, no_embedder, mode):
+    con.executemany("INSERT INTO files(id,path) VALUES(?,?)", [(1, "fields.pdf"), (2, "guide.pdf")])
+    con.executemany("INSERT INTO chunks(file_id,page,text) VALUES(?,?,?)", [
+        (1, 1, "glacier glacier glacier plateau plateau plateau"),
+        (2, 1, "plateau beside a glacier"),
+        (2, 4, "The plateau glacier flows across exposed rock."),
+    ])
+    first = search(con, "plateau glacier", mode, top_files=1)
+    results = search(con, "plateau glacier", mode, top_files=8)
+    assert first == results[:1]
+    assert first[0]["path"] == "guide.pdf" and first[0]["page"] == 4
+    assert "phrase" in first[0]["why"]
+
+
+def test_identical_content_keeps_other_locations_and_fills_the_result_limit(con, fake):
+    files = [(i, f"copies/report-{i}.pdf", "same") for i in range(1, 61)]
+    files.extend([(61, "similar.pdf", "different"), (62, "standalone.pdf", None)])
+    con.executemany("INSERT INTO files(id,path,sha256) VALUES(?,?,?)", files)
+    con.executemany("INSERT INTO chunks(file_id,page,text) VALUES(?,1,?)",
+                    [(i, "harbour harbour harbour" if i <= 60 else "near the harbour")
+                     for i, _, _ in files])
+    for mode in ["keyword", "hybrid"]:
+        results = search(con, "harbour", mode, top_files=3)
+        assert len(results) == 3
+        copies = next(hit for hit in results if hit["copies"])
+        assert len({copies["path"], *(c["path"] for c in copies["copies"])}) == 60
+    direct = search(con, "report-42.pdf")[0]
+    assert direct["path"] == "copies/report-42.pdf" and len(direct["copies"]) == 59
+
+
+def test_fragmented_single_word_needs_literal_evidence(corpus, fake, monkeypatch):
+    monkeypatch.setattr(embed, "fragmented_identifier", lambda q: q in ("a9bh8zj4", "automobile"))
+    assert search(corpus, "a9bh8zj4", "hybrid") == []
+    assert search(corpus, "a9bh8zj4", "semantic") == []
+    assert search(corpus, "automobile", "semantic")
+
+
+def test_descriptive_reranking_keeps_the_same_eight_candidates(con, monkeypatch):
+    for fid in range(1, 11):
+        con.execute("INSERT INTO files(id,path) VALUES(?,?)", (fid, f"{fid}.pdf"))
+        con.execute("INSERT INTO chunks(id,file_id,page,text) VALUES(?,?,1,'passage')", (fid, fid))
+    keyword = list(range(1, 9))
+    semantic = [9, 10, 8, 7, 6, 5, 4, 3]
+    monkeypatch.setattr(search_module, "keyword_ranks",
+                        lambda *args, **kw: [] if kw.get("phrase") else keyword)
+    monkeypatch.setattr(search_module, "semantic_scored",
+                        lambda *args, **kw: [(fid, 1 - i / 20) for i, fid in enumerate(semantic)])
+    terms = names(search(con, "city building rules", top_files=8))
+    description = names(search(con, "Which file explains city building rules?", top_files=8))
+    assert set(terms) == set(description)
+    assert terms[0] == "3.pdf" and description[0] == "9.pdf"
+
+
 def test_results_are_one_per_file_and_limited(corpus):
     assert len(search(corpus, "the", "keyword")) <= 5
     r = search(corpus, "transactions lost update writes atomic", "keyword")
     assert len(names(r)) == len(set(names(r)))
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+def test_many_matching_pages_do_not_hide_other_files(con, no_embedder, mode):
+    con.executemany("INSERT INTO files(id, path) VALUES(?, ?)", [(1, "manual.pdf"), (2, "notes.pdf")])
+    con.executemany("INSERT INTO chunks(file_id, page, text) VALUES(1, ?, 'engine fuel')",
+                    [(page,) for page in range(1, 525)])
+    con.execute("INSERT INTO chunks(file_id, page, text) VALUES(2, 7, 'engine fuel and oil for a car')")
+    results = search(con, "engine fuel garage", mode, top_files=2)
+    assert [(r["path"], r["page"]) for r in results] == [("manual.pdf", 1), ("notes.pdf", 7)]
+    assert results[1]["snippet"] == "engine fuel and oil for a car"
 
 
 @pytest.mark.parametrize("mode", ["keyword", "semantic", "hybrid"])
@@ -209,6 +320,16 @@ def test_semantic_with_no_embeddings_warns(con, docs, make_pdf, fake, quiet, cap
     assert "run `index` without --no-embed" in caplog.text
     assert "python -m recall.cli embed" in caplog.text
     assert search(con, "sorting", "hybrid")                           # keyword half still works
+    assert fake.calls == []
+
+
+def test_search_rejects_vectors_from_a_different_model(corpus, monkeypatch, fake):
+    monkeypatch.setattr(embed, "MODEL_NAME", "different-model-with-same-dimension")
+    fake.calls.clear()
+    with pytest.raises(SemanticUnavailable, match="rebuild the embeddings"):
+        search(corpus, "lost update", "semantic")
+    assert search(corpus, "lost update", "hybrid") == search(corpus, "lost update", "keyword")
+    assert fake.calls == []
 
 
 def test_partial_embeddings_warn_and_only_map_to_embedded_chunks(con, docs, make_pdf, fake, quiet, caplog):

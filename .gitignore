@@ -8,6 +8,10 @@ __pycache__/
 
 # Generated databases
 *.db
+/Desktop PDF inventory*.csv
+
+# Personal resume exports
+/output/pdf/*Resume*.pdf
 
 # Eval outputs
 eval_results.json

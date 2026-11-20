@@ -113,7 +113,7 @@
 <div class="wrap">
   <header>
     <h1>I remember the information, not the file.</h1>
-    <p>Describe what you remember. recall finds the PDF, the page and the passage on your computer.</p>
+    <p>Describe what you remember, or enter a filename. Recall finds the PDF, page and passage on your computer.</p>
   </header>
 
   <form id="form" role="search" autocomplete="off">
@@ -143,7 +143,13 @@
   let seq = 0;        // guards against out-of-order responses
 
   const modeValue = () => form.elements.mode.value;
-  const setMode = (m) => { const r = form.querySelector(`input[name="mode"][value="${m}"]`); if (r && !r.disabled) r.checked = true; };
+  const setMode = (mode) => {
+    const radios = Array.from(form.elements.mode);
+    const choice = radios.find((r) => r.value === mode && !r.disabled)
+      || radios.find((r) => r.value === "hybrid" && !r.disabled)
+      || radios.find((r) => r.value === "keyword");
+    choice.checked = true;
+  };
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function el(tag, props = {}, ...kids) {
@@ -174,7 +180,9 @@
     return frag;
   }
 
-  const WHY = { "keyword match": "Matched your words", "semantic match": "Matched the meaning",
+  const WHY = { "filename match": "Matched the filename", "keyword match": "Matched your words", "semantic match": "Matched the meaning",
+                "keyword phrase match": "Matched your phrase",
+                "keyword phrase match + semantic match": "Matched your phrase and the meaning",
                 "keyword match + semantic match": "Matched your words and the meaning" };
 
   function renderHit(r, query) {
@@ -204,6 +212,17 @@
     });
     actions.append(copy);
     li.append(actions);
+    if (r.copies && r.copies.length) {
+      const locations = el("ul");
+      for (const other of r.copies) {
+        const item = other.exists
+          ? el("a", { href: `${other.url}#page=${r.page}`, target: "_blank", rel: "noopener", text: other.path })
+          : el("span", { text: `${other.path} (missing)` });
+        locations.append(el("li", {}, item));
+      }
+      li.append(el("details", { class: "hit-folder" },
+        el("summary", { text: `Other locations (${r.copies.length})` }), locations));
+    }
     return li;
   }
 
@@ -216,28 +235,66 @@
     );
   }
 
-  async function loadStatus() {
-    try {
-      index = await (await fetch("/api/status")).json();
-    } catch { say("Can't reach the recall server. Is it still running?", "error"); return; }
-    if (!index.semantic_available) {
-      const r = form.querySelector('input[value="semantic"]');
-      r.disabled = true; r.parentElement.classList.add("off");
-      r.parentElement.title = "Install sentence-transformers to search by meaning";
-      if (modeValue() === "semantic") setMode("keyword");
-    }
-    if (!index.files) { renderEmptyIndex(); go.disabled = true; return; }
+  function showIndexStatus() {
+    if (!index) return;
+    if (!index.files) { renderEmptyIndex(); return; }
     const parts = [`${index.files} PDF${index.files === 1 ? "" : "s"} indexed`];
-    if (index.pending_embeddings) parts.push(`${index.pending_embeddings} passages still need embeddings, so meaning search is partial`);
+    if (!index.chunks) parts.push("Search by filename. These PDFs contain no searchable text");
+    else if (index.pending_embeddings === index.chunks) parts.push("Run the embed command to enable search by meaning");
+    else if (index.pending_embeddings) parts.push(`${index.pending_embeddings} passages still need embeddings, so meaning search is partial`);
     if (index.failed_files) parts.push(`${index.failed_files} file${index.failed_files === 1 ? "" : "s"} failed to index`);
     say(parts.join(". ") + ".");
   }
 
+  function showServerHelp() {
+    say("Open Recall from its local server. ", "error");
+    statusEl.append(
+      el("a", { href: "http://127.0.0.1:8000/", text: "Open Recall" }),
+      el("span", { text: ". To start the server from the project folder, run " }),
+      el("code", { text: "python -m recall.cli serve" }),
+      el("span", { text: " and open the address it prints." })
+    );
+  }
+
+  async function loadStatus() {
+    if (location.protocol === "file:") {
+      go.disabled = true;
+      showServerHelp();
+      return;
+    }
+    try {
+      const response = await fetch("/api/status");
+      if (response.status === 404 || (response.ok && !response.headers.get("content-type")?.includes("application/json"))) {
+        go.disabled = true;
+        showServerHelp();
+        return;
+      }
+      if (!response.ok) {
+        say(`Could not read the index status (HTTP ${response.status}). Check the server output and reload.`, "error");
+        return;
+      }
+      index = await response.json();
+    } catch { showServerHelp(); return; }
+    if (!index.semantic_available || index.chunks === index.pending_embeddings) {
+      for (const radio of form.elements.mode) {
+        if (radio.value === "keyword") continue;
+        radio.disabled = true;
+        radio.parentElement.classList.add("off");
+        radio.parentElement.title = index.semantic_available
+          ? "Index passages with embeddings to search by meaning"
+          : "Install sentence-transformers to search by meaning";
+      }
+      setMode("keyword");
+    }
+    go.disabled = !index.files;
+    fromUrl(false);
+  }
+
   async function run(query, mode, push) {
     query = query.trim();
-    if (!query) { clear(list); if (index && index.files) say(`${index.files} PDF${index.files === 1 ? "" : "s"} indexed.`); return; }
     const mine = ++seq;
-    if (push) history.pushState(null, "", `?q=${encodeURIComponent(query)}&mode=${mode}`);
+    if (push) history.pushState(null, "", query ? `?q=${encodeURIComponent(query)}&mode=${mode}` : location.pathname);
+    if (!query || go.disabled) { clear(list); showIndexStatus(); return; }
     say(mode === "keyword" ? "Searching…" : "Searching… the first search by meaning loads the language model and can take a minute.");
     clear(list);
     let data;
@@ -246,10 +303,11 @@
       data = await res.json();
       if (mine !== seq) return;
       if (!res.ok) { say(data.error || "Search failed.", "error"); return; }
-    } catch { if (mine === seq) say("Can't reach the recall server. Is it still running?", "error"); return; }
+    } catch { if (mine === seq) showServerHelp(); return; }
 
     if (!data.results.length) {
-      say(`No passages matched “${query}”. Try other words${mode === "keyword" ? ", or switch to Meaning" : ""}.`);
+      const meaningEnabled = !form.querySelector('input[value="semantic"]').disabled;
+      say(`No passages matched “${query}”. Try other words${mode === "keyword" && meaningEnabled ? ", or switch to Meaning" : ""}.`);
       return;
     }
     say(`${data.results.length} file${data.results.length === 1 ? "" : "s"} found in ${data.took_ms} ms.`);
@@ -267,11 +325,11 @@
   function fromUrl(push) {
     const p = new URLSearchParams(location.search);
     input.value = p.get("q") || "";
-    if (p.get("mode")) setMode(p.get("mode"));
+    setMode(p.get("mode"));
     run(input.value, modeValue(), push);
   }
 
-  loadStatus().then(() => fromUrl(false));
+  loadStatus();
 })();
 </script>
 </body>
